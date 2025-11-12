@@ -39,6 +39,7 @@ def get_broadcast_impl(name: str):
         "seq": "sequential_sync",
         "thread": "threadpool",
         "async": "python_async_await",
+        "zmq": "zeromq_impl",
     }
     if len(set(name_map.values())) != len(name_map.values()):
         raise RuntimeError("Duplicate module filenames detected in name_map")
@@ -174,6 +175,13 @@ def run_benchmark(
     impl_key: str,
     contiguous_layout: bool,
 ) -> None:
+    # Set IPC backend environment variable for ZMQ implementation
+    if impl_key == "zmq":
+        os.environ["KVCACHED_IPC_BACKEND"] = "zmq"
+        print(f"Using ZeroMQ IPC backend for benchmark")
+    else:
+        os.environ["KVCACHED_IPC_BACKEND"] = "unix"
+        print(f"Using UNIX socket IPC backend for benchmark")
     mp.set_start_method("spawn", force=True)
 
     # Spawn workers
@@ -331,9 +339,9 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--map-impl",
-        choices=["seq", "thread", "async"],
+        choices=["seq", "thread", "async", "zmq"],
         default="seq",
-        help="Which broadcast implementation to benchmark (default: seq).",
+        help="Which broadcast implementation to benchmark (default: seq). zmq uses ZeroMQ transport.",
     )
     parser.add_argument(
         "--not-contiguous",

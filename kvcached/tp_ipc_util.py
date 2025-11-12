@@ -12,6 +12,10 @@ from kvcached.vmm_ops import kv_tensors_created, map_to_kv_tensors, unmap_from_k
 
 SOCKET_DIR = "/tmp/kvcached-ipc"
 
+# Configuration for IPC backend selection
+# Options: "unix" (UNIX domain sockets) or "zmq" (ZeroMQ)
+IPC_BACKEND = os.getenv("KVCACHED_IPC_BACKEND", "unix").lower()
+
 
 def get_worker_socket_path(rank: int) -> str:
     """
@@ -64,50 +68,56 @@ def recv_msg(sock: socket.socket) -> Message:
 def start_worker_listener_thread(rank: int):
     """
     Start a thread that listens for messages on the worker socket.
-    The callback is called with the received message.
+    Uses ZeroMQ or UNIX sockets based on KVCACHED_IPC_BACKEND env var.
     """
-    os.makedirs(SOCKET_DIR, exist_ok=True)
-    socket_path = get_worker_socket_path(rank)
+    if IPC_BACKEND == "zmq":
+        # Use ZeroMQ listener
+        from kvcached.tp_ipc_zmq import start_worker_listener_thread as zmq_start_listener
+        zmq_start_listener(rank)
+    else:
+        # Use UNIX domain socket listener
+        os.makedirs(SOCKET_DIR, exist_ok=True)
+        socket_path = get_worker_socket_path(rank)
 
-    if os.path.exists(socket_path):
-        try:
-            os.remove(socket_path)
-        except OSError as e:
-            print(f"Error removing existing socket file {socket_path}: {e}")
-
-    server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server_sock.bind(socket_path)
-    server_sock.listen()
-
-    def listen_loop():
-        print(f"Worker {rank} IPC listener started at {socket_path}")
-        while True:
-            conn, _ = server_sock.accept()
+        if os.path.exists(socket_path):
             try:
-                msg: Message = recv_msg(conn)
-                # print(f"Worker {rank} received message: {msg}")
-                if msg["cmd"] == "map_to_kv_tensors":
-                    map_to_kv_tensors(msg["offsets"])
-                    send_msg(conn, {"status": "success"})
-                elif msg["cmd"] == "unmap_from_kv_tensors":
-                    unmap_from_kv_tensors(msg["offsets"])
-                    send_msg(conn, {"status": "success"})
-                elif msg["cmd"] == "kv_tensors_created":
-                    created: bool = kv_tensors_created()
-                    send_msg(conn, {"status": "success", "created": created})
-                else:
-                    send_msg(conn, {
-                        "status": "error",
-                        "message": "Unknown command"
-                    })
-            except Exception as e:
-                print(f"Worker {rank} error processing message: {e}")
-                send_msg(conn, {"status": "error", "message": str(e)})
-            finally:
-                conn.close()
+                os.remove(socket_path)
+            except OSError as e:
+                print(f"Error removing existing socket file {socket_path}: {e}")
 
-    t = threading.Thread(target=listen_loop, daemon=True)
-    t.start()
+        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server_sock.bind(socket_path)
+        server_sock.listen()
+
+        def listen_loop():
+            print(f"Worker {rank} IPC listener started at {socket_path} (backend: {IPC_BACKEND})")
+            while True:
+                conn, _ = server_sock.accept()
+                try:
+                    msg: Message = recv_msg(conn)
+                    # print(f"Worker {rank} received message: {msg}")
+                    if msg["cmd"] == "map_to_kv_tensors":
+                        map_to_kv_tensors(msg["offsets"])
+                        send_msg(conn, {"status": "success"})
+                    elif msg["cmd"] == "unmap_from_kv_tensors":
+                        unmap_from_kv_tensors(msg["offsets"])
+                        send_msg(conn, {"status": "success"})
+                    elif msg["cmd"] == "kv_tensors_created":
+                        created: bool = kv_tensors_created()
+                        send_msg(conn, {"status": "success", "created": created})
+                    else:
+                        send_msg(conn, {
+                            "status": "error",
+                            "message": "Unknown command"
+                        })
+                except Exception as e:
+                    print(f"Worker {rank} error processing message: {e}")
+                    send_msg(conn, {"status": "error", "message": str(e)})
+                finally:
+                    conn.close()
+
+        t = threading.Thread(target=listen_loop, daemon=True)
+        t.start()
 
 
 async def _send_and_receive_message(rank: int, message: Message) -> Message:
@@ -205,12 +215,36 @@ async def _broadcast_kv_tensors_created(tp_size: int) -> bool:
 
 # Wrapper functions to call the async function from sync code
 def broadcast_map_to_kv_tensors(tp_size: int, offsets: list[int]) -> None:
-    asyncio.run(_broadcast_map_to_kv_tensors(tp_size, offsets))
+    """
+    Broadcast map operation to all workers.
+    Uses ZeroMQ or UNIX sockets based on KVCACHED_IPC_BACKEND env var.
+    """
+    if IPC_BACKEND == "zmq":
+        from kvcached.tp_ipc_zmq import broadcast_map_to_kv_tensors as zmq_broadcast_map
+        zmq_broadcast_map(tp_size, offsets)
+    else:
+        asyncio.run(_broadcast_map_to_kv_tensors(tp_size, offsets))
 
 
 def broadcast_unmap_from_kv_tensors(tp_size: int, offsets: list[int]) -> None:
-    asyncio.run(_broadcast_unmap_from_kv_tensors(tp_size, offsets))
+    """
+    Broadcast unmap operation to all workers.
+    Uses ZeroMQ or UNIX sockets based on KVCACHED_IPC_BACKEND env var.
+    """
+    if IPC_BACKEND == "zmq":
+        from kvcached.tp_ipc_zmq import broadcast_unmap_from_kv_tensors as zmq_broadcast_unmap
+        zmq_broadcast_unmap(tp_size, offsets)
+    else:
+        asyncio.run(_broadcast_unmap_from_kv_tensors(tp_size, offsets))
 
 
 def broadcast_kv_tensors_created(tp_size: int) -> bool:
-    return asyncio.run(_broadcast_kv_tensors_created(tp_size))
+    """
+    Check if KV tensors are created on all workers.
+    Uses ZeroMQ or UNIX sockets based on KVCACHED_IPC_BACKEND env var.
+    """
+    if IPC_BACKEND == "zmq":
+        from kvcached.tp_ipc_zmq import broadcast_kv_tensors_created as zmq_broadcast_created
+        return zmq_broadcast_created(tp_size)
+    else:
+        return asyncio.run(_broadcast_kv_tensors_created(tp_size))

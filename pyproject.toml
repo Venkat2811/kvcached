@@ -41,6 +41,7 @@ dependencies = [
     "numpy>=1.26.0",
     "posix_ipc>=1.0",
     "wrapt>=1.15",
+    "pyzmq>=25.0.0",
 ]
 
 [project.scripts]
