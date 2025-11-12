@@ -245,12 +245,28 @@ def start_worker_listener_thread(rank: int):
         loop.close()
 
 
+# Global ZMQ context - reuse across all calls for better performance
+_zmq_context = None
+_zmq_sockets = {}  # Cache sockets per rank
+
+
+def _get_zmq_context():
+    """Get or create the global ZMQ context."""
+    global _zmq_context
+    if _zmq_context is None:
+        _zmq_context = zmq.asyncio.Context()
+    return _zmq_context
+
+
 async def _send_and_receive_message(rank: int, message: Message) -> Message:
     """
     Send a message to a worker and receive response using ZeroMQ.
     Uses DEALER socket for client-side communication.
+
+    NOTE: This creates a new socket per call but reuses the global context.
+    For even better performance, consider socket pooling in future.
     """
-    context = zmq.asyncio.Context()
+    context = _get_zmq_context()
     socket = context.socket(zmq.DEALER)
     socket.setsockopt(zmq.LINGER, 0)
     socket.setsockopt(zmq.RCVHWM, 0)
@@ -282,7 +298,7 @@ async def _send_and_receive_message(rank: int, message: Message) -> Message:
 
     finally:
         socket.close()
-        context.term()
+        # Don't terminate context - it's global and reused
 
 
 async def _broadcast_map_to_kv_tensors(tp_size: int, offsets: List[int]) -> None:
